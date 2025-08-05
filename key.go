@@ -20,6 +20,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/rsa"
 	"encoding/asn1"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -28,6 +29,16 @@ import (
 	"github.com/google/go-tpm/legacy/tpm2"
 	"github.com/google/go-tpm/tpmutil"
 )
+
+// TssFormat defines the ASN.1 structure for serializing TPM key blobs,
+// as per the TSS2 specification: https://www.hansenpartnership.com/draft-bottomley-tpm2-keys.html
+type TssFormat struct {
+	Oid          asn1.ObjectIdentifier
+	EmptyAuth    bool `asn1:"explicit,optional,tag:0"`
+	ParentHandle int
+	PublicBlob   []byte
+	PrivateBlob  []byte
+}
 
 // PrivateKey represents a private key resident on a TPM 2.0 device. RSA and
 // ECC private keys are supported for signing, and only RSA keys are supported
@@ -308,6 +319,62 @@ func NewFromBlobs(
 		pubKey:         pubKey,
 		scheme:         scheme,
 	}, nil
+}
+
+func NewFromTssPEM(
+	path string,
+	pemTSS *pem.Block,
+	parentPassword string,
+	password string,
+) (*PrivateKey, error) {
+
+	var tss2 TssFormat
+	_, err := asn1.Unmarshal(pemTSS.Bytes, &tss2)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshall TSS2 pem: %v", err)
+	}
+
+	return NewFromBlobs(
+		path,
+		uint32(tss2.ParentHandle),
+		parentPassword,
+		tss2.PublicBlob[2:],
+		tss2.PrivateBlob[2:],
+		password,
+	)
+}
+
+func (k *PrivateKey) ExportToTssPEM() (*pem.Block, error) {
+	//TSS2 file format requires a 2-byte size header for the private and public blob
+
+	// Add 2-byte size header to pubBlob: encodes blob length as prefix
+	// Splits pubSize into high byte (>>8) and low byte (&0xFF) then prepends to blob
+	pubSize := len(k.publicBlob)
+	pub := append([]byte{byte(pubSize >> 8), byte(pubSize & 0xFF)}, k.publicBlob...)
+
+	//Same for the private blob
+	privSize := len(k.privateBlob)
+	priv := append([]byte{byte(privSize >> 8), byte(privSize & 0xFF)}, k.privateBlob...)
+
+	emptyAuth := false
+	if k.password == "" {
+		emptyAuth = true
+	}
+
+	tss := TssFormat{
+		Oid:          asn1.ObjectIdentifier{2, 23, 133, 10, 1, 3}, // where 3 stands for loadable key, cf : https://www.hansenpartnership.com/draft-bottomley-tpm2-keys.html#name-tpmkey-syntax
+		EmptyAuth:    emptyAuth,
+		ParentHandle: int(k.parentHandle),
+		PublicBlob:   pub,
+		PrivateBlob:  priv,
+	}
+
+	tssBytes, err := asn1.Marshal(tss)
+	if err != nil {
+		return nil, err
+	}
+
+	return &pem.Block{Type: "TSS2 PRIVATE KEY", Bytes: tssBytes}, nil
 }
 
 // publicKeyAndScheme reads a public area from an active handle and returns the
