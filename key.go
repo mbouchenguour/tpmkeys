@@ -321,6 +321,12 @@ func NewFromBlobs(
 	}, nil
 }
 
+// NewFromTssPEM returns a private key object representing the key referred to
+// by the provided TSS2 PEM block. The TSS2 structure contains the parent handle,
+// public and private area blobs. This function extracts the blobs and handle,
+// then calls NewFromBlobs. A connection to the TPM is opened and closed, and 
+// the key loaded and flushed, with each use of the key, so the returned key is 
+// usable for as long as the parent key remains at the specified persistent handle.
 func NewFromTssPEM(
 	path string,
 	pemTSS *pem.Block,
